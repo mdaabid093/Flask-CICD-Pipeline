@@ -1,226 +1,175 @@
-# Flask CI/CD & GitOps Pipeline — Project Overview
+# Flask CI/CD & GitOps Pipeline
 
-A hands-on DevOps project demonstrating a complete path from source code to a
-running, self-healing deployment: **CI with GitHub Actions → containerization
-with Docker → orchestration with Kubernetes → GitOps delivery with ArgoCD →
-observability with Prometheus & Grafana.**
+A production-style DevOps pipeline built from scratch: a Flask app that goes
+from `git push` to a running, monitored deployment with zero manual steps —
+tested, containerized, deployed via GitOps, and observable.
 
-This document is written as an interview-ready summary: what was built, why
-each piece exists, how they connect, and the real issues hit (and fixed)
-along the way.
+**Pipeline:** GitHub Actions (CI) → Docker Hub → ArgoCD (GitOps) → Kubernetes → Prometheus & Grafana
 
 ---
 
-## 1. Architecture at a Glance
+## What this project shows
 
-```
-Developer
-   │  git push
-   ▼
-GitHub Repository ───────────────► GitHub Actions (CI)
-   ▲                                   │
-   │ bot commit (new image tag)        │ 1. run tests (pytest)
-   │                                   │ 2. build Docker image
-   │                                   │ 3. push image → Docker Hub
-   │                                   │ 4. update k8s/deployment.yaml
-   │                                   │ 5. commit + push back to repo
-   └───────────────────────────────────┘
-                    │
-                    ▼
-              ArgoCD (GitOps)
-     watches the Git repo continuously
-     auto-syncs cluster state to match Git
-     self-heals if cluster drifts from Git
-                    │
-                    ▼
-        Kubernetes Cluster (local)
-     ┌─────────────────────────────┐
-     │ Deployment (2 replicas)     │
-     │ Service (NodePort)          │
-     │ ServiceMonitor              │
-     └─────────────────────────────┘
-                    │
-                    ▼
-      Prometheus (scrapes /metrics every 15s)
-                    │
-                    ▼
-      Grafana (dashboards & visualization)
-```
+- A complete CI/CD pipeline, not just isolated tool usage
+- GitOps delivery: Git is the single source of truth, and the cluster
+  self-heals if it ever drifts from what Git declares
+- Kubernetes fundamentals: Deployments, Services, rolling updates
+- Application observability: custom Prometheus metrics and Grafana dashboards
+- Real engineering trade-offs made along the way (see [Design Decisions](#design-decisions))
 
-**Core idea (GitOps):** Git is the single source of truth. Nobody runs
-`kubectl apply` by hand for normal changes — a `git push` alone is enough to
-take code from a laptop to a running, monitored deployment.
+<!-- Add a screenshot here, e.g.: -->
+<!-- ![Dashboard](docs/dashboard.png) -->
+<!-- ![ArgoCD sync view](docs/argocd.png) -->
 
 ---
 
-## 2. Tech Stack
+## Architecture
 
-| Layer | Tool | Purpose |
-|---|---|---|
-| Application | Flask (Python) | Simple web app with health/info endpoints |
-| WSGI server | Gunicorn | Production-grade server (not Flask's dev server) |
-| Testing | pytest | Runs automatically in CI, gates bad code from deploying |
-| Containerization | Docker | Packages app + dependencies into a portable image |
-| Image registry | Docker Hub | Stores built images, tagged by Git commit SHA |
-| CI | GitHub Actions | Tests, builds, pushes images, updates manifests |
-| Orchestration | Kubernetes | Runs and manages containers (Deployment + Service) |
-| GitOps / CD | ArgoCD | Watches Git, auto-syncs cluster, self-heals drift |
-| Metrics collection | Prometheus | Scrapes `/metrics` on an interval, stores time-series data |
-| Visualization | Grafana | Dashboards built on top of Prometheus data |
-| Package management (K8s) | Helm | Installed the Prometheus/Grafana stack as one chart |
+```
+ git push
+    │
+    ▼
+GitHub Actions ──► runs tests ──► builds image ──► pushes to Docker Hub
+    │                                                     │
+    │◄──── commits new image tag back to the repo ────────┘
+    ▼
+ArgoCD  (watches the repo, auto-syncs, self-heals drift)
+    ▼
+Kubernetes  (Deployment + Service, 2 replicas, rolling updates)
+    ▼
+Prometheus  (scrapes /metrics every 15s)  ──►  Grafana  (dashboards)
+```
+
+A single `git push` is the only manual step. Everything after that —
+testing, building, tagging, deploying, and keeping the cluster in sync — is
+automated.
 
 ---
 
-## 3. Repository Structure
+## Tech Stack
+
+Flask · Gunicorn · pytest · Docker · GitHub Actions · Kubernetes · Helm ·
+ArgoCD · Prometheus · Grafana
+
+---
+
+## Getting Started
+
+**Prerequisites:** Docker, `kubectl`, a local Kubernetes cluster, Helm,
+Python 3.11+
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/mdaabid093/Flask-CICD-Pipeline.git
+cd Flask-CICD-Pipeline
+
+# 2. Run the app locally
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python app.py
+# visit http://localhost:5000
+
+# 3. Run the tests
+pytest tests/
+
+# 4. Build and run the container
+docker build -t flask-devops-demo .
+docker run -p 5000:5000 flask-devops-demo
+```
+
+**Deploying to Kubernetes:**
+
+```bash
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+```
+
+**Setting up the full GitOps loop** requires installing ArgoCD and pointing
+an Application at the `k8s/` folder in this repo (Application → Repository:
+this repo, Path: `k8s`, Sync Policy: Automated).
+
+**Setting up monitoring** requires installing the `kube-prometheus-stack`
+Helm chart and applying `k8s/servicemonitor.yaml`, which tells Prometheus
+to scrape this app's `/metrics` endpoint every 15 seconds.
+
+---
+
+## CI/CD Pipeline
+
+Every push to `main` triggers `.github/workflows/ci.yml`:
+
+1. Checkout code
+2. Run the `pytest` suite — acts as a quality gate; nothing downstream runs
+   if tests fail
+3. Build a Docker image, tagged with the Git commit SHA (not `latest`) so
+   every deployed version is traceable to an exact commit
+4. Push the image to Docker Hub
+5. Update `k8s/deployment.yaml` with the new image tag and commit that
+   change back to the repo
+
+ArgoCD picks up that manifest change automatically and rolls it out —
+closing the loop from source code to a live, updated deployment.
+
+---
+
+## Observability
+
+The app exposes a `/metrics` endpoint (via `prometheus_client`) tracking:
+
+- **Request count**, labeled by method, endpoint, and status code
+- **Request latency**, as a histogram, enabling percentile queries
+
+Example Grafana queries used in the dashboard:
+
+```promql
+# Requests per second
+rate(flask_request_count_total[1m])
+
+# p95 latency
+histogram_quantile(0.95, rate(flask_request_latency_seconds_bucket[5m]))
+```
+
+---
+
+## Design Decisions
+
+- **Commit-SHA image tags instead of `latest`** — guarantees every
+  deployment is traceable to an exact commit and gives ArgoCD a real diff
+  to detect, rather than a tag name that never changes.
+- **GitOps (ArgoCD) over manual `kubectl apply`** — makes the cluster's
+  state auditable, reversible (`git revert`), and self-healing if it ever
+  drifts from what's declared in Git.
+- **Manual Prometheus instrumentation (`prometheus_client`) over an
+  auto-instrumentation library** — chosen after hitting a version
+  incompatibility between Flask 3.x and a popular auto-instrumentation
+  package; explicit instrumentation traded a little convenience for
+  reliability and full visibility into what's actually being tracked.
+- **Rolling updates with 2 replicas** — ensures zero-downtime deploys;
+  Kubernetes brings up new pods and confirms health before terminating old
+  ones.
+
+---
+
+## Project Structure
 
 ```
-flask-devops-demo/
-├── app.py                     # Flask app: routes, metrics instrumentation
-├── requirements.txt           # Pinned dependencies (Flask, gunicorn, prometheus-client)
-├── Dockerfile                 # Multi-step image build, layer-cached deps
-├── .dockerignore / .gitignore # Keep venv/tests out of image & repo bloat
-├── templates/
-│   └── index.html             # Styled status page (version badge, pod hostname)
-├── tests/
-│   └── test_app.py            # pytest suite — CI's quality gate
+├── app.py                     # Flask app + Prometheus instrumentation
+├── requirements.txt
+├── Dockerfile
+├── templates/index.html
+├── tests/test_app.py
 ├── k8s/
-│   ├── deployment.yaml        # 2 replicas, image tag updated automatically by CI
-│   ├── service.yaml           # NodePort service, labeled for Prometheus discovery
-│   └── servicemonitor.yaml    # Tells Prometheus Operator to scrape this service
-└── .github/workflows/
-    └── ci.yml                 # The full CI pipeline definition
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── servicemonitor.yaml
+└── .github/workflows/ci.yml
 ```
 
 ---
 
-## 4. How the CI Pipeline Works (`.github/workflows/ci.yml`)
+## Author
 
-Triggered on every push to `main`:
+Built by Md Aabid Hussain — [GitHub](https://github.com/mdaabid093)
 
-1. **Checkout code** — fresh runner VM, pulls the repo
-2. **Set up Python** — matches the version used in the Docker image
-3. **Install dependencies** — from `requirements.txt`
-4. **Run tests (`pytest`)** — the quality gate; if this fails, everything
-   downstream is skipped and nothing broken ever gets deployed
-5. **Log in to Docker Hub** — using GitHub Secrets (`DOCKERHUB_USERNAME`,
-   `DOCKERHUB_TOKEN`), never hardcoded credentials
-6. **Build & push the image** — tagged with the **commit SHA** (not `latest`),
-   so every deployed version is traceable to an exact commit
-7. **Update `k8s/deployment.yaml`** — a `sed` command rewrites the image tag
-   in place to the new SHA
-8. **Commit and push that manifest change back to the repo**, authored by a
-   bot identity, with `[skip ci]` in the message to avoid an infinite
-   trigger loop
-
-This last step is what closes the loop — it's the difference between "CI
-builds an image" and "a single `git push` results in a live redeploy with no
-human running any `kubectl` command."
-
----
-
-## 5. How GitOps / ArgoCD Works
-
-- An ArgoCD **Application** object points at this repo's `k8s/` folder and a
-  target cluster/namespace
-- **Auto-Sync** is enabled: any new commit ArgoCD detects in `k8s/` is
-  applied automatically — no manual "Sync" click needed
-- **Self Heal** is enabled: if someone manually changes or deletes a
-  resource directly in the cluster (bypassing Git), ArgoCD detects the drift
-  and reverts it back to match Git within moments — proven by manually
-  deleting the Service and watching ArgoCD recreate it unprompted
-- **Prune** is enabled: if a resource is removed from Git, ArgoCD removes it
-  from the cluster too, so nothing lingers that Git no longer describes
-
-**Rollback approach:** ArgoCD's own "History and Rollback" UI can
-re-apply an older synced state instantly, but since Auto-Sync + Self Heal
-are on, ArgoCD will re-apply the latest Git commit again unless Git itself
-is also rolled back. The durable fix is `git revert <bad-commit>` — this
-keeps Git and the live cluster in agreement permanently, rather than
-fighting the self-healing behavior.
-
----
-
-## 6. Kubernetes Objects Explained
-
-- **Deployment** — declares how many replicas (2) of the Flask container
-  should run, and Kubernetes keeps that many alive automatically, replacing
-  any that crash. Rolling updates happen automatically on image change: new
-  pods come up and pass health checks before old ones are terminated —
-  zero-downtime deploys.
-- **Service (NodePort)** — gives the Pods a stable network identity even as
-  individual Pods are replaced; routes traffic to whichever Pods currently
-  match its label selector.
-- **ServiceMonitor** — a custom resource (added by the Prometheus Operator)
-  that tells Prometheus which Service to scrape, on which port, at which
-  path, and how often — without hand-editing Prometheus's own config file.
-
----
-
-## 7. Monitoring: Prometheus + Grafana
-
-**Why:** deployment automation (CI/CD) proves code *reaches* production;
-monitoring proves it's actually *healthy* once there. Both are expected
-DevOps skills.
-
-- The Flask app exposes a `/metrics` endpoint using the `prometheus_client`
-  Python library — a `Counter` tracks total requests (labeled by method,
-  endpoint, status code) and a `Histogram` tracks request latency.
-- Prometheus (installed via the `kube-prometheus-stack` Helm chart) scrapes
-  that endpoint every 15 seconds via the ServiceMonitor and stores the
-  values as time-series data.
-- Grafana connects to Prometheus as a data source and visualizes it —
-  e.g. `rate(flask_request_count_total[1m])` for requests-per-second, or
-  `histogram_quantile(0.95, rate(flask_request_latency_seconds_bucket[5m]))`
-  for p95 latency, a standard real-world SLO metric.
-
-**Core mental model:** the app generates raw numbers → Prometheus *pulls*
-(scrapes) and stores them with timestamps → Grafana *queries* Prometheus and
-draws the results as panels grouped into dashboards.
-
----
-
-## 8. Real Issues Hit & Fixed (good interview material)
-
-Debugging real problems is often more convincing in an interview than a
-clean run-through. Genuine issues resolved during this build:
-
-- **`venv/` accidentally committed to Git**, causing ArgoCD to reject the
-  repo outright with an "out-of-bounds symlinks" error (a Python venv's
-  symlinked interpreter pointed outside the repo). Fixed with
-  `git rm -r --cached venv/` plus a correct `.gitignore`.
-- **GitHub Actions secret misconfiguration** (`Username and password
-  required` on Docker Hub login) — resolved by correctly naming repo
-  secrets and using a Docker Hub **access token**, never the account
-  password.
-- **Divergent Git branches** after CI pushed a bot commit that wasn't
-  pulled locally first — resolved by understanding merge vs rebase
-  strategies (`git config pull.rebase false`) instead of blindly retrying.
-- **A stray YAML character** (`-name: http` instead of `name: http`) silently
-  broke Service port naming, which in turn broke Prometheus's ability to
-  discover the scrape target — a good example of why small YAML syntax
-  errors can cause confusing downstream failures.
-- **Missing `gunicorn` in `requirements.txt`** caused
-  `CrashLoopBackOff` in production pods — even though CI showed fully
-  green — because passing tests never guaranteed the container itself could
-  actually start. This is a concrete example of why testing alone isn't a
-  complete safety net; the built artifact still needs to be verified.
-- **Flask/`prometheus-flask-exporter` version incompatibility** — a
-  third-party auto-instrumentation library silently failed to register its
-  `/metrics` route on a newer Flask version. Resolved by switching to
-  direct, explicit instrumentation with `prometheus_client`, trading a
-  little convenience for reliability and a clearer understanding of what
-  was actually happening under the hood.
-
----
-
-## 9. What This Project Demonstrates
-
-- End-to-end CI/CD pipeline design, not just individual tool usage
-- GitOps principles: Git as source of truth, declarative infrastructure,
-  drift detection and self-healing
-- Kubernetes fundamentals: Deployments, Services, label-based linking,
-  rolling updates
-- Observability basics: metrics instrumentation, scraping, PromQL,
-  dashboarding
-- Real debugging methodology: isolating a failure to a specific stage of
-  the pipeline rather than guessing, checking logs/events at each layer
+*Feedback welcome — feel free to open an issue or reach out.*
