@@ -2,8 +2,6 @@ from flask import Flask, jsonify, render_template, Response, request, g
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 import os
 import time
-from flask import jsonify
-
 
 app = Flask(__name__)
 
@@ -43,6 +41,10 @@ def home():
 def health():
     return jsonify(status="healthy"), 200
 
+@app.route('/ready')
+def ready():
+    return jsonify(status="ready"), 200
+
 @app.route('/api/info')
 def info():
     return jsonify({
@@ -50,13 +52,6 @@ def info():
         "version": os.getenv('APP_VERSION', 'v1.0'),
         "hostname": os.uname().nodename
     })
-@app.route('/health')
-def health():
-    return jsonify(status="healthy"), 200
-
-@app.route('/ready')
-def ready():
-    return jsonify(status="ready"), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
